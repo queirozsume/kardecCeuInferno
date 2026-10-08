@@ -46,6 +46,8 @@ def page_text(page, physical_page, headers):
         text = clean_block(block[4])
         if not text:
             continue
+        if text == 'A carne é fraca39':
+            text = 'A carne é fraca'
         if block[1] < HEADER_BAND_BOTTOM and text in headers:
             continue
         if (block[1] > page.rect.height - 60 and text == str(physical_page)):

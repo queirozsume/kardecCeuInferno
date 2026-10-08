@@ -20,6 +20,27 @@ class ReaderBlock {
   final String text;
 }
 
+class _FlowBlock {
+  const _FlowBlock({
+    required this.text,
+    required this.printedPage,
+    required this.isHeading,
+    this.nodes = const [],
+  });
+
+  final String text;
+  final int printedPage;
+  final bool isHeading;
+  final List<TocNode> nodes;
+}
+
+class _FlowPage {
+  const _FlowPage(this.blocks, this.printedPage);
+
+  final List<_FlowBlock> blocks;
+  final int printedPage;
+}
+
 class ReaderBook {
   factory ReaderBook(List<ReaderPage> pages) {
     final blocks = [
@@ -234,15 +255,17 @@ class TextBookReader extends StatefulWidget {
 
 class _TextBookReaderState extends State<TextBookReader> {
   final Future<ReaderBook> _book = ReaderBook.load();
-  final ScrollController _scrollController = ScrollController();
+  final PageController _pageController = PageController();
+  List<_FlowPage> _flowPages = [];
+  Map<TocNode, int> _pageForNode = {};
+  Size? _paginationSize;
+  double? _paginationFontSize;
+  int _pageIndex = 0;
   double _fontSize = 18;
-  late final Map<TocNode, GlobalKey> _tocKeys = {
-    for (final node in _allContentsNodes()) node: GlobalKey(),
-  };
 
   @override
   void dispose() {
-    _scrollController.dispose();
+    _pageController.dispose();
     super.dispose();
   }
 
@@ -255,14 +278,198 @@ class _TextBookReaderState extends State<TextBookReader> {
       ),
     );
     if (!mounted || node == null) return;
-    final targetContext = _tocKeys[node]?.currentContext;
-    if (targetContext != null) {
-      await Scrollable.ensureVisible(
-        targetContext,
+    final targetPage = _pageForNode[node];
+    if (targetPage != null && _pageController.hasClients) {
+      await _pageController.animateToPage(
+        targetPage,
         duration: const Duration(milliseconds: 350),
-        alignment: 0.05,
+        curve: Curves.easeInOut,
       );
     }
+  }
+
+  void _turnPage(bool forward) {
+    if (!_pageController.hasClients || _flowPages.isEmpty) return;
+    final target = (_pageIndex + (forward ? 1 : -1))
+        .clamp(0, _flowPages.length - 1)
+        .toInt();
+    if (target == _pageIndex) return;
+    _pageController.animateToPage(
+      target,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOut,
+    );
+  }
+
+  List<_FlowBlock> _makeFlowBlocks(ReaderBook book) {
+    final nodesByBlock = <int, List<TocNode>>{};
+    for (final entry in book.anchors.entries) {
+      (nodesByBlock[entry.value] ??= []).add(entry.key);
+    }
+
+    final result = <_FlowBlock>[];
+    for (var index = 0; index < book.blocks.length; index++) {
+      final sourceBlock = book.blocks[index];
+      final nodes = nodesByBlock[index] ?? const <TocNode>[];
+      final partNodes = nodes
+          .where((node) => bookContents.contains(node) && node.children.isNotEmpty)
+          .toList();
+      for (final part in partNodes) {
+        result.add(_FlowBlock(
+          text: part.title,
+          printedPage: sourceBlock.printedPage,
+          isHeading: true,
+          nodes: [part],
+        ));
+      }
+
+      final isPartTitleBlock = partNodes.any(
+        (part) =>
+            _normalizeTitle(sourceBlock.text) == _normalizeTitle(_nodeLabel(part)),
+      );
+      if (isPartTitleBlock) continue;
+
+      result.add(_FlowBlock(
+        text: sourceBlock.text,
+        printedPage: sourceBlock.printedPage,
+        isHeading: nodes.any(book.matchedAnchors.contains),
+        nodes: nodes,
+      ));
+    }
+    return result;
+  }
+
+  TextStyle _styleFor(BuildContext context, _FlowBlock block) {
+    final base = block.isHeading
+        ? Theme.of(context).textTheme.titleLarge
+        : Theme.of(context).textTheme.bodyLarge;
+    return (base ?? const TextStyle()).copyWith(
+      fontSize: _fontSize + (block.isHeading ? 2 : 0),
+      height: 1.7,
+      fontWeight: block.isHeading ? FontWeight.w600 : FontWeight.normal,
+      color: block.isHeading ? Theme.of(context).colorScheme.primary : null,
+    );
+  }
+
+  double _measureBlock(BuildContext context, _FlowBlock block, double width) {
+    final painter = TextPainter(
+      text: TextSpan(text: block.text, style: _styleFor(context, block)),
+      textDirection: Directionality.of(context),
+    )..layout(maxWidth: width);
+    return painter.height + (block.isHeading ? 26 : 18);
+  }
+
+  List<_FlowBlock> _splitBlock(
+    BuildContext context,
+    _FlowBlock block,
+    double width,
+    double maxHeight,
+  ) {
+    final spacing = block.isHeading ? 26.0 : 18.0;
+    final availableTextHeight = maxHeight - spacing;
+    if (_measureBlock(context, block, width) <= maxHeight) return [block];
+
+    final fragments = <_FlowBlock>[];
+    var remaining = block.text;
+    while (remaining.isNotEmpty) {
+      final painter = TextPainter(
+        text: TextSpan(text: remaining, style: _styleFor(context, block)),
+        textDirection: Directionality.of(context),
+      )..layout(maxWidth: width);
+      if (painter.height <= availableTextHeight) {
+        fragments.add(_FlowBlock(
+          text: remaining,
+          printedPage: block.printedPage,
+          isHeading: fragments.isEmpty && block.isHeading,
+          nodes: fragments.isEmpty ? block.nodes : const [],
+        ));
+        break;
+      }
+
+      var splitAt = painter
+          .getPositionForOffset(Offset(width, availableTextHeight))
+          .offset
+          .clamp(0, remaining.length)
+          .toInt();
+      while (splitAt > 0 &&
+          splitAt < remaining.length &&
+          !RegExp(r'\s').hasMatch(remaining[splitAt - 1])) {
+        splitAt--;
+      }
+      if (splitAt <= 0 || splitAt >= remaining.length) {
+        splitAt = remaining.lastIndexOf(' ', (remaining.length * 0.8).floor());
+        if (splitAt <= 0) splitAt = (remaining.length / 2).floor();
+      }
+      if (splitAt <= 0) splitAt = remaining.length;
+
+      fragments.add(_FlowBlock(
+        text: remaining.substring(0, splitAt).trim(),
+        printedPage: block.printedPage,
+        isHeading: fragments.isEmpty && block.isHeading,
+        nodes: fragments.isEmpty ? block.nodes : const [],
+      ));
+      remaining = remaining.substring(splitAt).trimLeft();
+    }
+    return fragments;
+  }
+
+  void _paginate(BuildContext context, ReaderBook book, Size viewport) {
+    if (_paginationSize == viewport &&
+        _paginationFontSize == _fontSize &&
+        _flowPages.isNotEmpty) {
+      return;
+    }
+
+    final previousPrintedPage = _flowPages.isEmpty
+        ? null
+        : _flowPages[_pageIndex.clamp(0, _flowPages.length - 1)].printedPage;
+    final width = (viewport.width - 48).clamp(120.0, double.infinity).toDouble();
+    final height = (viewport.height - 128).clamp(180.0, double.infinity).toDouble();
+    final pages = <_FlowPage>[];
+    final current = <_FlowBlock>[];
+    var usedHeight = 0.0;
+
+    void finishPage() {
+      if (current.isEmpty) return;
+      pages.add(_FlowPage(List<_FlowBlock>.of(current), current.first.printedPage));
+      current.clear();
+      usedHeight = 0;
+    }
+
+    for (final block in _makeFlowBlocks(book)) {
+      for (final fragment in _splitBlock(context, block, width, height)) {
+        final blockHeight = _measureBlock(context, fragment, width);
+        if (current.isNotEmpty && usedHeight + blockHeight > height) finishPage();
+        current.add(fragment);
+        usedHeight += blockHeight;
+      }
+    }
+    finishPage();
+
+    final pageForNode = <TocNode, int>{};
+    for (var pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+      for (final block in pages[pageIndex].blocks) {
+        for (final node in block.nodes) {
+          pageForNode.putIfAbsent(node, () => pageIndex);
+        }
+      }
+    }
+    _flowPages = pages;
+    _pageForNode = pageForNode;
+    _paginationSize = viewport;
+    _paginationFontSize = _fontSize;
+
+    if (previousPrintedPage != null) {
+      final index = pages.indexWhere((page) => page.printedPage >= previousPrintedPage);
+      _pageIndex = index < 0 ? pages.length - 1 : index;
+    } else {
+      _pageIndex = 0;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _pageController.hasClients && pages.isNotEmpty) {
+        _pageController.jumpToPage(_pageIndex);
+      }
+    });
   }
 
   @override
@@ -280,59 +487,6 @@ class _TextBookReaderState extends State<TextBookReader> {
         }
 
         final book = snapshot.data!;
-        final nodesByBlock = <int, List<TocNode>>{};
-        for (final entry in book.anchors.entries) {
-          (nodesByBlock[entry.value] ??= []).add(entry.key);
-        }
-
-        Widget buildBlock(int index) {
-          final nodes = nodesByBlock[index] ?? const <TocNode>[];
-          final isMatchedTitle = nodes.any(book.matchedAnchors.contains);
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              for (final node in nodes)
-                KeyedSubtree(
-                  key: _tocKeys[node],
-                  child: const SizedBox.shrink(),
-                ),
-              for (final node in nodes)
-                if (node.children.isNotEmpty && bookContents.contains(node))
-                  Padding(
-                    padding: const EdgeInsets.only(top: 18, bottom: 12),
-                    child: Text(
-                      node.title,
-                      style: Theme.of(context)
-                          .textTheme
-                          .titleLarge
-                          ?.copyWith(fontWeight: FontWeight.w600),
-                    ),
-                  ),
-              Padding(
-                padding: EdgeInsets.only(
-                  top: isMatchedTitle ? 12 : 0,
-                  bottom: 12,
-                ),
-                child: Text(
-                  book.blocks[index].text,
-                  style: (isMatchedTitle
-                          ? Theme.of(context).textTheme.titleLarge
-                          : Theme.of(context).textTheme.bodyLarge)
-                      ?.copyWith(
-                    fontSize: _fontSize + (isMatchedTitle ? 2 : 0),
-                    height: 1.7,
-                    fontWeight:
-                        isMatchedTitle ? FontWeight.w600 : FontWeight.normal,
-                    color: isMatchedTitle
-                        ? Theme.of(context).colorScheme.primary
-                        : null,
-                  ),
-                ),
-              ),
-            ],
-          );
-        }
-
         return Scaffold(
           appBar: AppBar(
             title: const Text('O Céu e o Inferno'),
@@ -370,18 +524,48 @@ class _TextBookReaderState extends State<TextBookReader> {
             icon: const Icon(Icons.list_alt),
             label: const Text('Sumário'),
           ),
-          body: SelectionArea(
-            child: SingleChildScrollView(
-              controller: _scrollController,
-              padding: const EdgeInsets.fromLTRB(24, 24, 24, 104),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  for (var index = 0; index < book.blocks.length; index++)
-                    buildBlock(index),
-                ],
-              ),
-            ),
+          body: LayoutBuilder(
+            builder: (context, constraints) {
+              final viewport = Size(constraints.maxWidth, constraints.maxHeight);
+              _paginate(context, book, viewport);
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTapUp: (details) {
+                  if (details.localPosition.dx < constraints.maxWidth * 0.2) {
+                    _turnPage(false);
+                  } else if (details.localPosition.dx > constraints.maxWidth * 0.8) {
+                    _turnPage(true);
+                  }
+                },
+                child: PageView.builder(
+                  controller: _pageController,
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _flowPages.length,
+                  onPageChanged: (index) => setState(() => _pageIndex = index),
+                  itemBuilder: (context, index) => SelectionArea(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(24, 24, 24, 104),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          for (final block in _flowPages[index].blocks)
+                            Padding(
+                              padding: EdgeInsets.only(
+                                top: block.isHeading ? 16 : 0,
+                                bottom: block.isHeading ? 10 : 8,
+                              ),
+                              child: Text(
+                                block.text,
+                                style: _styleFor(context, block),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
           ),
         );
       },
