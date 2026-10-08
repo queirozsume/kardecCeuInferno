@@ -41,6 +41,7 @@ def running_headers(document):
 
 def page_text(page, physical_page, headers):
     paragraphs = []
+    chapter_title_follows = False
     for block in page.get_text('blocks', sort=True):
         text = clean_block(block[4])
         if not text:
@@ -49,6 +50,11 @@ def page_text(page, physical_page, headers):
             continue
         if (block[1] > page.rect.height - 60 and text == str(physical_page)):
             continue
+        if chapter_title_follows:
+            text = re.sub(r'^[MN]\s+', '', text)
+            chapter_title_follows = False
+        if re.fullmatch(r'CAP[IÍ]TULO\s+[IVXLCDM]+', text, flags=re.IGNORECASE):
+            chapter_title_follows = True
         paragraphs.append(text)
     return '\n\n'.join(paragraphs)
 

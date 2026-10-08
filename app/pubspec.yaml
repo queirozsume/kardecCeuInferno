@@ -1,7 +1,7 @@
 name: o_ceu_e_o_inferno
 description: Leitura e busca em O Céu e o Inferno.
 publish_to: none
-version: 1.0.1+2
+version: 1.0.2+3
 
 environment:
   sdk: ^3.3.0
