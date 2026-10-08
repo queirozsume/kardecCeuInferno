@@ -42,7 +42,7 @@ jobs:
         run: |
           test -n "$KEYSTORE_B64" && test -n "$STORE_PASSWORD"
           echo "$KEYSTORE_B64" | base64 -d > android/release-keystore.p12
-          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=livro\nstoreFile=release-keystore.p12\nstoreType=pkcs12\n' \
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=livro\nstoreFile=../release-keystore.p12\nstoreType=pkcs12\n' \
             "$STORE_PASSWORD" "$STORE_PASSWORD" > android/key.properties
       - run: flutter pub get
       - run: flutter build apk --release
